@@ -1,4 +1,36 @@
-use actix_web::{self, web, error, App, HttpRequest, HttpResponse, HttpServer};
+use actix_web::{self, web, error, App, HttpRequest, HttpResponse, HttpServer, middleware::Logger};
+// use env_logger::Env;
+
+use tracing::{Subscriber, subscriber::set_global_default};
+use tracing_log::LogTracer;
+use tracing_actix_web::TracingLogger;
+use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
+use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+
+/// Compose multiple layers into a `tracing`'s subscriber.
+pub fn get_subscriber(
+    name: String,
+    env_filter: String
+) -> impl Subscriber + Send + Sync {
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or(EnvFilter::new(env_filter));
+    let formatting_layer = BunyanFormattingLayer::new(
+        name.into(),
+        std::io::stdout
+    );
+    Registry::default()
+        .with(env_filter)
+        .with(JsonStorageLayer)
+        .with(formatting_layer)
+}
+
+/// Register a subscriber as global default to process span data.
+///
+/// It should only be called once!
+pub fn init_subscriber(subscriber: impl Subscriber + Send + Sync) {
+    LogTracer::init().expect("Failed to set logger");
+    set_global_default(subscriber).expect("Failed to set subscriber");
+}
 
 use std::sync::Mutex;
 
@@ -43,6 +75,7 @@ async fn create_buff(
 ) -> actix_web::Result<HttpResponse> {
     let mut db = data.db.lock().unwrap();
     let x: models::CreateBuff = (*buff).clone();
+
     let buff = match db.add_buff(x) {
         Ok(y) => y,
         Err(e) => return Err(error::ErrorInternalServerError(format!("{:?}", e)))
@@ -53,6 +86,11 @@ async fn create_buff(
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    // env_logger::Builder::from_env(Env::default().default_filter_or("DEBUG")).init();
+
+    let subscriber = get_subscriber("app".into(), "info".into());
+    init_subscriber(subscriber);
+
     let inmem = store::InMem::new();
     let app_state = web::Data::new(AppState {
         db: Mutex::new(inmem),
@@ -60,6 +98,7 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move|| {
         App::new()
+            .wrap(TracingLogger)
             .app_data(app_state.clone())
             .route("/buff/{id}", web::get().to(get_buff))
             .route("/buff/", web::post().to(create_buff))
